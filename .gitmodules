@@ -1,0 +1,3 @@
+[submodule "tinynn"]
+	path = tinynn
+	url = https://github.com/borgwang/tinynn.git
