@@ -41,17 +41,32 @@ class ParamServer(object):
 
         self.cnt = 0
         self.start_time = time.time()
+        self.last_eval_time = -1
 
     def get_params(self):
         return self.model.net.params
 
-    def apply_grads(self, *grads):
-        self.model.apply_grad(sum(grads))
+    def set_params(self, params):
+        self.model.net.params = params
 
-        self.cnt += len(grads)
-        if self.cnt % 100 == 0:
+    def apply_update(self, values, type_, cnt=1):
+        assert type_ in ("grads", "params")
+        if type_ == "grads":
+            self.apply_grads(values)
+        else:
+            self.set_params(values)
+
+        # update counts
+        self.cnt += cnt
+
+        # evaluate 
+        if time.time() - self.last_eval_time > 10:
+            self.last_eval_time = time.time()
             self.evaluate()  
     
+    def apply_grads(self, grads):
+        self.model.apply_grad(grads)
+
     def evaluate(self):
         self.model.set_phase("TEST")
         test_x, test_y = self.test_set
@@ -77,7 +92,7 @@ class Worker(object):
         self.iterator = BatchIterator(batch_size=args.batch_size)
         self.batch_gen = None
 
-    def get_params(self, params):
+    def get_params(self):
         return self.model.net.params
 
     def set_params(self, params):
@@ -97,37 +112,38 @@ class Worker(object):
             end_epoch = True
         return batch, end_epoch
 
-    def compute_grads(self, batch=None):
-        if batch is None:
-            batch, _ = self.get_next_batch()
-
-        # fetch model params from server
+    def grab_params(self):
         params = ray.get(self.ps.get_params.remote())
         self.set_params(params)
 
-        # get local gradients
+    def compute_grads(self):
+        batch, _ = self.get_next_batch()
+
         preds = self.model.forward(batch.inputs)
         _, grads = self.model.backward(preds, batch.targets)
         return grads
 
-    def train_one_epoch(self):
-        end_epoch = False
-        while not end_epoch:
-            batch, end_epoch = self.get_next_batch()
-            grads = self.compute_grads(batch)
-            self.ps.apply_grads.remote(grads)
-        return self.get_params()
+    def apply_grads(self, grads):
+        self.model.apply_grad(grads)
 
 
 def SSGD(ps, workers, iter_each_epoch):
     """Synchronous Stochastic Gradient Descent"""
     for i in range(args.num_ep * iter_each_epoch):
-        all_grads = [worker.compute_grads.remote() for worker in workers]
-        ps.apply_grads.remote(*all_grads)
+        all_grads = []
 
-        params = ps.get_params.remote()
+        global_params = ps.get_params.remote()
         for worker in workers:
-            worker.set_params.remote(params)
+            worker.set_params.remote(global_params)
+            local_grads = worker.compute_grads.remote()
+            all_grads.append(local_grads)
+        all_grads = ray.get(all_grads)
+
+        # average local gradients
+        grads = sum(all_grads) / len(workers)
+
+        # update global model
+        ps.apply_update.remote(grads, type_="grads", cnt=len(workers))
 
 
 def MA(ps, workers, iter_each_epoch):
@@ -135,25 +151,69 @@ def MA(ps, workers, iter_each_epoch):
     Model Average Method
     see: https://www.aclweb.org/anthology/N10-1069.pdf
     """
-    for i in range(args.num_ep):
-        all_params = [worker.train_one_epoch.remote() for worker in workers]
-        all_params = ray.get(all_params)
-        ps.set_params.remote(sum(all_params))
+    M = 10  # communication interval
 
-        params = ps.get_params.remote()
+    for i in range(args.num_ep * iter_each_epoch // M):
+        all_params = []
+
+        global_params = ps.get_params.remote()
         for worker in workers:
-            worker.set_params.remote(params)
-    
+            worker.set_params.remote(global_params)
+            for _ in range(M):
+                local_grads = worker.compute_grads.remote()
+                worker.apply_grads.remote(local_grads)
+            local_params = worker.get_params.remote()
+            all_params.append(local_params)
 
-def BMUF():
-    pass
+        all_params = ray.get(all_params)
+
+        # average parameters
+        params = sum(all_params) / len(workers)
+
+        # update global model
+        ps.apply_update.remote(params, type_="params", 
+                               cnt=len(workers) * iter_each_epoch)
 
 
-def ADMM():
-    pass
+def BMUF(ps, workers, iter_each_epoch):
+    """
+    Blcok-wise Model Update Filtering
+    see: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/0005880.pdf
+    """
+    M = 10  # communication interval
+
+    m = 0  # momentum
+    beta = 0.9  # coefficient of momentum
+    t = 0
+
+    for i in range(args.num_ep * iter_each_epoch // M):
+        t += 1
+        all_params = []
+
+        global_params = ps.get_params.remote()
+        for worker in workers:
+            # train for M batches
+            worker.set_params.remote(global_params)
+            for _ in range(M):
+                local_grads = worker.compute_grads.remote()
+                worker.apply_grads.remote(local_grads)
+
+            local_params = worker.get_params.remote()
+            all_params.append(local_params)
+
+        all_params = ray.get(all_params)
+
+        # parameter with momentum
+        params = sum(all_params) / len(workers)
+        m = beta * m + (1.0 - beta) * params
+        m_ = m / (1 - beta ** t)  # bias correction
+
+        # update global model
+        ps.apply_update.remote(m_, type_="params", 
+                               cnt=len(workers) * iter_each_epoch)
 
 
-def EASGD():
+def ADMM(ps, workers, iter_each_epoch):
     pass
 
 
@@ -183,6 +243,12 @@ def main():
         SSGD(ps, workers, iter_each_epoch)
     elif args.algo == "MA":
         MA(ps, workers, iter_each_epoch)
+    elif args.algo == "BMUF":
+        BMUF(ps, workers, iter_each_epoch)
+    elif args.algo == "ADMM":
+        ADMM(ps, workers, iter_each_epoch)
+    elif args.algo == "EASGD":
+        EASGD(ps, workers, iter_each_epoch)
     else:
         print("Invalid training algorithm.")
 
@@ -197,7 +263,7 @@ if __name__ == "__main__":
                         help="[*SSGD|MA|BUMF|ADMM|EASGD]")
     parser.add_argument("--data_dir", type=str,
                         default=os.path.join(curr_dir, "data"))
-    parser.add_argument("--num_proc", type=int, default=8,
+    parser.add_argument("--num_proc", type=int, default=4,
                         help="Number of workers.")
     parser.add_argument("--num_ep", default=50, type=int)
     parser.add_argument("--lr", default=1e-3, type=float)
