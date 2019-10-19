@@ -125,4 +125,4 @@ dmypy.json
 .pyre/
 
 # customize
-/data
+/distributed-ml/data
