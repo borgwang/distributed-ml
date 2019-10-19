@@ -1,6 +1,7 @@
 """Synchronous SGD"""
 
 import runtime_path  # isort:skip
+
 import argparse
 import copy
 import os
@@ -9,8 +10,6 @@ import time
 
 import numpy as np
 import ray
-
-sys.path.insert(0, os.path.abspath("./tinynn"))
 
 from core.layer import Dense
 from core.layer import ReLU
@@ -23,8 +22,6 @@ from utils.dataset import mnist
 from utils.metric import accuracy
 from utils.seeder import random_seed
 
-# TODO: Something wrong when trying to import tinynn with Ray.
-# see: https://github.com/ray-project/ray/issues/5125
 
 def get_one_hot(targets, nb_classes):
     return np.eye(nb_classes)[np.array(targets).reshape(-1)]
@@ -32,9 +29,8 @@ def get_one_hot(targets, nb_classes):
 
 def get_model():
     net = Net([Dense(200), ReLU(), Dense(50), ReLU(), Dense(10)])
-    model = Model(net=net, loss=SoftmaxCrossEntropy(),
-                  optimizer=Adam(lr=args.lr))
-    return model
+    return Model(net=net, loss=SoftmaxCrossEntropy(),
+                 optimizer=Adam(lr=args.lr))
 
 
 @ray.remote
@@ -141,7 +137,7 @@ def MA(ps, workers, iter_each_epoch):
     Model Average Method
     see: https://www.aclweb.org/anthology/N10-1069.pdf
     """
-    for i in range(num_updates):
+    for i in range(args.num_ep):
         all_params = [worker.train_one_epoch.remote() for worker in workers]
         all_params = ray.get(all_params)
         ps.set_params.remote(sum(all_params))
@@ -185,7 +181,9 @@ def main():
         workers.append(worker)
 
     iter_each_epoch = len(train_set[0]) // args.batch_size + 1
-    if args.algo == "MA":
+    if args.algo == "SSGD":
+        SSGD(ps, workers, iter_each_epoch)
+    elif args.algo == "MA":
         MA(ps, workers, iter_each_epoch)
     else:
         print("Invalid training algorithm.")

@@ -7,3 +7,12 @@
     - Asynchronous SGD
 
 
+#### Get started
+
+```bash
+pip install -r requirements.txt
+# add tinynn to python path
+PYTHONPATH=$PYTHONPATH:$PROJECT_DIR/tinynn python sync_run.py --algo SSGD
+```
+
+
