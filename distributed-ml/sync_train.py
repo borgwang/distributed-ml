@@ -3,6 +3,7 @@
 import argparse
 import copy
 import os
+import sys
 import time
 
 import numpy as np
@@ -36,9 +37,9 @@ def get_model(lr):
 @ray.remote
 class ParamServer(object):
 
-    def __init__(self, model, test_set):
-        self.test_set = test_set
+    def __init__(self, model, ds):
         self.model = model
+        self.ds = ds
 
         self.cnt = 0
         self.start_time = time.time()
@@ -69,11 +70,13 @@ class ParamServer(object):
 
     def evaluate(self):
         self.model.set_phase("TEST")
-        test_x, test_y = self.test_set
+
+        test_x, test_y = ray.get(self.ds.test_set.remote())
+
         test_pred = self.model.forward(test_x)
 
         test_pred_idx = np.argmax(test_pred, axis=1)
-        test_y_idx = np.asarray(test_y)
+        test_y_idx = np.argmax(test_y, axis=1)
 
         print("[%.2fs] accuracy after %d batches: " %
               (time.time() - self.start_time, self.cnt))
@@ -84,13 +87,9 @@ class ParamServer(object):
 @ray.remote
 class Worker(object):
 
-    def __init__(self, model, train_set, ps, batch_size):
+    def __init__(self, model, ds):
         self.model = model
-        self.train_set = train_set
-        self.ps = ps
-
-        self.iterator = BatchIterator(batch_size=batch_size)
-        self.batch_gen = None
+        self.ds = ds
 
     def get_params(self):
         return self.model.net.params
@@ -98,50 +97,66 @@ class Worker(object):
     def set_params(self, params):
         self.model.net.params = params
 
-    def get_next_batch(self):
-        end_epoch = False
-        # reset batch generator if needed
+    def compute_grads(self, batch):
+        preds = self.model.forward(batch.inputs)
+        _, grads = self.model.backward(preds, batch.targets)
+        return grads
+
+    def apply_grads(self, grads):
+        self.model.apply_grad(grads)
+
+    def elastic_update(self, params, alpha=0.5):
+        diff = self.model.net.params - params
+        self.model.net.params -= alpha * diff
+
+
+@ray.remote
+class DataServer(object):
+
+    def __init__(self, dataset, batch_size, num_ep):
+        self._train_set, self._test_set = dataset
+
+        self.iterator = BatchIterator(batch_size)
+        self.batch_gen = None
+
+        iter_each_epoch = len(self._train_set[0]) // batch_size + 1
+        self._total_iters = num_ep * iter_each_epoch
+
+    def test_set(self):
+        return self._test_set
+
+    def total_iters(self):
+        return self._total_iters
+
+    def next_batch(self):
         if self.batch_gen is None:
-            self.batch_gen = self.iterator(*self.train_set)
+            self.batch_gen = self.iterator(*self._train_set)
 
         try:
             batch = next(self.batch_gen)
         except StopIteration:
             self.batch_gen = None
-            batch, _ = self.get_next_batch()
-            end_epoch = True
-        return batch, end_epoch
-
-    def compute_grads(self):
-        batch, _ = self.get_next_batch()
-        preds = self.model.forward(batch.inputs)
-        _, grads = self.model.backward(preds, batch.targets)
-        return grads
-
-    def compute_elastic_grads(self, alpha=0.1):
-        local_grads = self.compute_grads()
-        local_params = self.get_params()
-
-        global_params = ray.get(self.ps.get_params.remote())
-        elastic = local_grads + alpha * (local_params - global_params)
-        return local_grads + elastic
-
-    def apply_grads(self, grads):
-        self.model.apply_grad(grads)
+            batch = self.next_batch()
+        return batch
 
 
-def SSGD(ps, workers, iter_each_epoch, num_ep):
+def SSGD(ds, ps, workers):
     """
     Synchronous Stochastic Gradient Descent
     ref: https://papers.nips.cc/paper/4006-parallelized-stochastic-gradient-descent.pdf
     """
-    for i in range(num_ep * iter_each_epoch):
+    # iterations for each worker
+    iterations = ray.get(ds.total_iters.remote())
+    for i in range(iterations):
         all_grads = []
 
         global_params = ps.get_params.remote()
         for worker in workers:
             worker.set_params.remote(global_params)
-            local_grads = worker.compute_grads.remote()
+
+            batch = ds.next_batch.remote()
+            local_grads = worker.compute_grads.remote(batch)
+
             all_grads.append(local_grads)
         all_grads = ray.get(all_grads)
 
@@ -151,21 +166,24 @@ def SSGD(ps, workers, iter_each_epoch, num_ep):
         ps.apply_update.remote(grads, type_="grads", cnt=len(workers))
 
 
-def MA(ps, workers, iter_each_epoch, num_ep):
+def MA(ds, ps, workers):
     """ 
     Model Average Method
     ref: https://www.aclweb.org/anthology/N10-1069.pdf
     """
-    comm_interval = 10
-
-    for i in range(num_ep * iter_each_epoch // M):
+    comm_interval = 10  # interval of communication
+    
+    # iterations for each worker
+    iterations = ray.get(ds.total_iters.remote())
+    for i in range(iterations // comm_interval):
         all_params = []
 
         global_params = ps.get_params.remote()
         for worker in workers:
             worker.set_params.remote(global_params)
             for _ in range(comm_interval):
-                local_grads = worker.compute_grads.remote()
+                batch = ds.next_batch.remote()
+                local_grads = worker.compute_grads.remote(batch)
                 worker.apply_grads.remote(local_grads)
             local_params = worker.get_params.remote()
             all_params.append(local_params)
@@ -175,21 +193,25 @@ def MA(ps, workers, iter_each_epoch, num_ep):
         # average parameters
         params = sum(all_params) / len(workers)
         # update global model
-        ps.apply_update.remote(params, type_="params", cnt=len(workers) * M)
+        ps.apply_update.remote(params, type_="params", 
+                               cnt=len(workers) * comm_interval)
 
 
-def BMUF(ps, workers, iter_each_epoch, num_ep):
+def BMUF(ds, ps, workers):
     """
     Blcok-wise Model Update Filtering
     ref: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/0005880.pdf
     """
-    comm_interval = 10  # communication interval
+    comm_interval = 10  # interval of communication
 
     beta = 0.9  # momentum coef
     m = 0  # momentum
     t = 0
 
-    for i in range(num_ep * iter_each_epoch // M):
+    # iterations for each worker
+    iterations = ray.get(ds.total_iters.remote())
+
+    for i in range(iterations // comm_interval):
         t += 1
         all_params = []
 
@@ -197,7 +219,8 @@ def BMUF(ps, workers, iter_each_epoch, num_ep):
         for worker in workers:
             worker.set_params.remote(global_params)
             for _ in range(comm_interval):
-                local_grads = worker.compute_grads.remote()
+                batch = ds.next_batch.remote()
+                local_grads = worker.compute_grads.remote(batch)
                 worker.apply_grads.remote(local_grads)
 
             local_params = worker.get_params.remote()
@@ -210,10 +233,10 @@ def BMUF(ps, workers, iter_each_epoch, num_ep):
         m = beta * m + (1.0 - beta) * params
         m_ = m / (1 - beta ** t)  # bias correction
         # update global model
-        ps.apply_update.remote(m_, type_="params", cnt=len(workers) * M)
+        ps.apply_update.remote(m_, type_="params", cnt=len(workers) * comm_interval)
 
 
-def EASGD(ps, workers, iter_each_epoch, num_ep):
+def EASGD(ds, ps, workers):
     """
     Elastic Average Stochastic Gradient Decent
     ref: https://arxiv.org/abs/1412.6651
@@ -223,16 +246,25 @@ def EASGD(ps, workers, iter_each_epoch, num_ep):
     m = 0  # momentum
     t = 0
 
-    for i in range(num_ep * iter_each_epoch):
+    # iterations for each worker
+    iterations = ray.get(ds.total_iters.remote())
+    for i in range(iterations):
         t += 1
 
         all_params = []
+        global_params = ps.get_params.remote()
+
         for worker in workers:
-            grads = worker.compute_elastic_grads.remote(alpha)
-            worker.apply_grads.remote(grads)
+            batch = ds.next_batch.remote()
+            local_grads = worker.compute_grads.remote(batch)
+            worker.apply_grads.remote(local_grads)
+
+            # update local parameters elastically
+            worker.elastic_update.remote(global_params, alpha)
 
             local_params = worker.get_params.remote()
             all_params.append(local_params)
+
         all_params = ray.get(all_params)
 
         # parameter with momentum
@@ -247,27 +279,25 @@ def main(args):
     if args.seed >= 0:
         random_seed(args.seed)
 
-    # data preparation
-    train_set, valid_set, test_set = mnist(args.data_dir)
+    # dataset preparation
+    train_set, _, test_set = mnist(args.data_dir)
     train_set = (train_set[0], get_one_hot(train_set[1], 10))
+    test_set = (test_set[0], get_one_hot(test_set[1], 10))
+    dataset = (train_set, test_set)
 
     ray.init()
-
     # init a network model
     model = get_model(args.lr)
+    # init the data server
+    ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
     # init the parameter server
-    ps = ParamServer.remote(model=copy.deepcopy(model),
-                            test_set=test_set)
+    ps = ParamServer.remote(model=copy.deepcopy(model), ds=ds)
+
     # init workers
     workers = []
     for rank in range(1, args.num_proc + 1):
-        worker = Worker.remote(model=copy.deepcopy(model),
-                               train_set=train_set,
-                               ps=ps,
-                               batch_size=args.batch_size)
+        worker = Worker.remote(model=copy.deepcopy(model), ds=ds)
         workers.append(worker)
-
-    iter_each_epoch = len(train_set[0]) // args.batch_size + 1
 
     algo_dict = {"SSGD": SSGD, "MA": MA, "BMUF": BMUF, "EASGD": EASGD}
     algo = algo_dict.get(args.algo, None)
@@ -277,9 +307,7 @@ def main(args):
         return 
 
     # run synchronous training
-    algo(ps, workers, iter_each_epoch, args.num_ep)
-
-    time.sleep(10000)
+    algo(ds, ps, workers)
 
 
 if __name__ == "__main__":
@@ -292,7 +320,7 @@ if __name__ == "__main__":
                         default=os.path.join(curr_dir, "data"))
     parser.add_argument("--num_proc", type=int, default=4,
                         help="Number of workers.")
-    parser.add_argument("--num_ep", default=50, type=int)
+    parser.add_argument("--num_ep", default=4, type=int)
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--seed", default=-1, type=int)
