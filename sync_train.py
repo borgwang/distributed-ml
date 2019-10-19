@@ -1,7 +1,5 @@
 """Synchronous SGD"""
 
-import runtime_path  # isort:skip
-
 import argparse
 import copy
 import os
