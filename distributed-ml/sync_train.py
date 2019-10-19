@@ -3,7 +3,6 @@
 import argparse
 import copy
 import os
-import sys
 import time
 
 import numpy as np
@@ -119,12 +118,12 @@ class Worker(object):
         _, grads = self.model.backward(preds, batch.targets)
         return grads
 
-    def compute_elastic_grads(self, coef=0.1):
+    def compute_elastic_grads(self, alpha=0.1):
         local_grads = self.compute_grads()
         local_params = self.get_params()
 
         global_params = ray.get(self.ps.get_params.remote())
-        elastic = coef * (local_params - global_params)
+        elastic = local_grads + alpha * (local_params - global_params)
         return local_grads + elastic
 
     def apply_grads(self, grads):
@@ -219,8 +218,8 @@ def EASGD(ps, workers, iter_each_epoch, num_ep):
     Elastic Average Stochastic Gradient Decent
     ref: https://arxiv.org/abs/1412.6651
     """
-    alpha = 0.5  # elastic coef
-    beta = 0.9  # momentum coef
+    alpha = 0.5  # elastic coefficient
+    beta = 0.9  # momentum coefficient
     m = 0  # momentum
     t = 0
 
@@ -229,7 +228,7 @@ def EASGD(ps, workers, iter_each_epoch, num_ep):
 
         all_params = []
         for worker in workers:
-            grads = worker.compute_elastic_grads.remote(coef=alpha)
+            grads = worker.compute_elastic_grads.remote(alpha)
             worker.apply_grads.remote(grads)
 
             local_params = worker.get_params.remote()
@@ -256,7 +255,6 @@ def main(args):
 
     # init a network model
     model = get_model(args.lr)
-
     # init the parameter server
     ps = ParamServer.remote(model=copy.deepcopy(model),
                             test_set=test_set)
@@ -278,7 +276,7 @@ def main(args):
               "Available choices: [SSGD|MA|BUMF|EASGD]")
         return 
 
-    # run sysnchronous training
+    # run synchronous training
     algo(ps, workers, iter_each_epoch, args.num_ep)
 
     time.sleep(10000)
