@@ -4,7 +4,6 @@ import argparse
 import copy
 import os
 import pickle
-import sys
 import time
 
 import numpy as np
@@ -234,7 +233,7 @@ def MA(ss, ds, ps, workers):
 
 def BMUF(ss, ds, ps, workers):
     """
-    Blcok-wise Model Update Filtering
+    Block-wise Model Update Filtering
     ref: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/0005880.pdf
     """
     history = []
@@ -242,7 +241,7 @@ def BMUF(ss, ds, ps, workers):
     start_time = time.time()
 
     comm_interval = 10  # interval of communication
-    beta = 0.5  # momentum coef
+    beta = 0.5  # momentum coefficient
     m = 0  # momentum
     t = 0
 

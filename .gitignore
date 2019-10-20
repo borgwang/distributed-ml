@@ -126,3 +126,4 @@ dmypy.json
 
 # customize
 /distributed-ml/data
+/distributed-ml/result
