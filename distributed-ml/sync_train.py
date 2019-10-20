@@ -285,7 +285,7 @@ def BMUF(ss, ds, ps, workers):
 
 def EASGD(ss, ds, ps, workers):
     """
-    Elastic Average Stochastic Gradient Decent
+    Elastic Average Stochastic Gradient Descent
     ref: https://arxiv.org/abs/1412.6651
     """
     history = []
