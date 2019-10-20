@@ -65,9 +65,8 @@ class StatsServer(object):
 @ray.remote
 class ParamServer(object):
 
-    def __init__(self, model, ds):
+    def __init__(self, model):
         self.model = model
-        self.ds = ds
 
         self.start_time = time.time()
 
@@ -91,9 +90,8 @@ class ParamServer(object):
 @ray.remote
 class Worker(object):
 
-    def __init__(self, model, ds):
+    def __init__(self, model):
         self.model = model
-        self.ds = ds
 
     def get_params(self):
         return self.model.net.params
@@ -358,11 +356,11 @@ def main(args):
     # init the data server
     ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
     # init the parameter server
-    ps = ParamServer.remote(model=copy.deepcopy(model), ds=ds)
+    ps = ParamServer.remote(model=copy.deepcopy(model))
     # init workers
     workers = []
     for rank in range(1, args.num_workers + 1):
-        worker = Worker.remote(model=copy.deepcopy(model), ds=ds)
+        worker = Worker.remote(model=copy.deepcopy(model))
         workers.append(worker)
 
     algo_dict = {"SSGD": SSGD, "MA": MA, "BMUF": BMUF, "EASGD": EASGD}
@@ -392,10 +390,10 @@ if __name__ == "__main__":
                         default=os.path.join(curr_dir, "data"))
     parser.add_argument("--result_dir", type=str,
                         default=os.path.join(curr_dir, "result"))
-    parser.add_argument("--num_workers", type=int, default=2,
+    parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of workers.")
-    parser.add_argument("--num_ep", default=1, type=int)
-    parser.add_argument("--lr", default=1e-3, type=float)
-    parser.add_argument("--batch_size", default=128, type=int)
+    parser.add_argument("--num_ep", default=4, type=int)
+    parser.add_argument("--lr", default=5e-4, type=float)
+    parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--seed", default=-1, type=int)
     main(parser.parse_args())
