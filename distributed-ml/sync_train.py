@@ -26,7 +26,16 @@ def get_one_hot(targets, nb_classes):
 
 
 def get_model(lr):
-    net = Net([Dense(200), ReLU(), Dense(50), ReLU(), Dense(10)])
+    net = Net([
+        Dense(200),
+        ReLU(),
+        Dense(100),
+        ReLU(),
+        Dense(70),
+        ReLU(),
+        Dense(30),
+        ReLU(),
+        Dense(10)])
     model = Model(net=net, loss=SoftmaxCrossEntropy(),
                   optimizer=Adam(lr=lr))
     # init parameters manually
@@ -204,13 +213,12 @@ def BMUF(ds, ps, workers):
     """
     comm_interval = 10  # interval of communication
 
-    beta = 0.9  # momentum coef
+    beta = 0.5  # momentum coef
     m = 0  # momentum
     t = 0
 
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
-
     for i in range(iterations // comm_interval):
         t += 1
         all_params = []
@@ -241,8 +249,8 @@ def EASGD(ds, ps, workers):
     Elastic Average Stochastic Gradient Decent
     ref: https://arxiv.org/abs/1412.6651
     """
-    alpha = 0.5  # elastic coefficient
-    beta = 0.9  # momentum coefficient
+    alpha = 0.05  # elastic coefficient
+    beta = 0.5  # momentum coefficient
     m = 0  # momentum
     t = 0
 
@@ -292,10 +300,9 @@ def main(args):
     ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
     # init the parameter server
     ps = ParamServer.remote(model=copy.deepcopy(model), ds=ds)
-
     # init workers
     workers = []
-    for rank in range(1, args.num_proc + 1):
+    for rank in range(1, args.num_workers + 1):
         worker = Worker.remote(model=copy.deepcopy(model), ds=ds)
         workers.append(worker)
 
@@ -318,7 +325,7 @@ if __name__ == "__main__":
                         help="[*SSGD|MA|BUMF|EASGD]")
     parser.add_argument("--data_dir", type=str,
                         default=os.path.join(curr_dir, "data"))
-    parser.add_argument("--num_proc", type=int, default=4,
+    parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of workers.")
     parser.add_argument("--num_ep", default=4, type=int)
     parser.add_argument("--lr", default=1e-3, type=float)
