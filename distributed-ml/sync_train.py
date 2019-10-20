@@ -1,8 +1,9 @@
-"""Synchronous SGD"""
+"""Synchronous training of neural networks."""
 
 import argparse
 import copy
 import os
+import pickle
 import sys
 import time
 
@@ -44,15 +45,32 @@ def get_model(lr):
 
 
 @ray.remote
+class StatsServer(object):
+
+    def __init__(self, model):
+        self.model = model
+        self.model.set_phase("TEST")
+
+    def set_params(self, params):
+        self.model.net.params = params
+
+    def evaluate(self, test_set):
+        test_x, test_y = test_set
+        test_pred = self.model.forward(test_x)
+
+        test_pred_idx = np.argmax(test_pred, axis=1)
+        test_y_idx = np.argmax(test_y, axis=1)
+        return accuracy(test_pred_idx, test_y_idx)
+        
+
+@ray.remote
 class ParamServer(object):
 
     def __init__(self, model, ds):
         self.model = model
         self.ds = ds
 
-        self.cnt = 0
         self.start_time = time.time()
-        self.last_eval_time = -1
 
     def get_params(self):
         return self.model.net.params
@@ -60,37 +78,15 @@ class ParamServer(object):
     def set_params(self, params):
         self.model.net.params = params
 
-    def apply_update(self, values, type_, cnt=1):
+    def apply_update(self, values, type_):
         assert type_ in ("grads", "params")
         if type_ == "grads":
             self.apply_grads(values)
         else:
             self.set_params(values)
-        # update counts
-        self.cnt += cnt
-
-        # evaluate 
-        if time.time() - self.last_eval_time > 5:
-            self.last_eval_time = time.time()
-            self.evaluate()  
     
     def apply_grads(self, grads):
         self.model.apply_grad(grads)
-
-    def evaluate(self):
-        self.model.set_phase("TEST")
-
-        test_x, test_y = ray.get(self.ds.test_set.remote())
-
-        test_pred = self.model.forward(test_x)
-
-        test_pred_idx = np.argmax(test_pred, axis=1)
-        test_y_idx = np.argmax(test_y, axis=1)
-
-        print("[%.2fs] accuracy after %d batches: " %
-              (time.time() - self.start_time, self.cnt))
-        print(accuracy(test_pred_idx, test_y_idx))
-        self.model.set_phase("TRAIN")
 
 
 @ray.remote
@@ -149,11 +145,15 @@ class DataServer(object):
         return batch
 
 
-def SSGD(ds, ps, workers):
+def SSGD(ss, ds, ps, workers):
     """
     Synchronous Stochastic Gradient Descent
     ref: https://papers.nips.cc/paper/4006-parallelized-stochastic-gradient-descent.pdf
     """
+    history = []
+    start_time = time.time()
+    batch_cnt = 0
+
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations):
@@ -172,14 +172,29 @@ def SSGD(ds, ps, workers):
         # average local gradients
         grads = sum(all_grads) / len(workers)
         # update global model
-        ps.apply_update.remote(grads, type_="grads", cnt=len(workers))
+        ps.apply_update.remote(grads, type_="grads")
+        batch_cnt += len(workers)
+
+        # evaluation
+        ss.set_params.remote(ps.get_params.remote())
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
+        res = {"t": time.time() - start_time, 
+               "acc": acc["accuracy"],
+               "batch_cnt": batch_cnt}
+        print(res)
+        history.append(res)
+    return history
 
 
-def MA(ds, ps, workers):
+def MA(ss, ds, ps, workers):
     """ 
     Model Average Method
     ref: https://www.aclweb.org/anthology/N10-1069.pdf
     """
+    history = []
+    batch_cnt = 0
+    start_time = time.time()
+
     comm_interval = 10  # interval of communication
     
     # iterations for each worker
@@ -202,17 +217,31 @@ def MA(ds, ps, workers):
         # average parameters
         params = sum(all_params) / len(workers)
         # update global model
-        ps.apply_update.remote(params, type_="params", 
-                               cnt=len(workers) * comm_interval)
+        ps.apply_update.remote(params, type_="params")
+        batch_cnt += len(workers) * comm_interval
+
+        # evaluation
+        ss.set_params.remote(ps.get_params.remote())
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
+        res = {"t": time.time() - start_time, 
+               "acc": acc["accuracy"],
+               "batch_cnt": batch_cnt}
+        print(res)
+        history.append(res)
+
+    return history
 
 
-def BMUF(ds, ps, workers):
+def BMUF(ss, ds, ps, workers):
     """
     Blcok-wise Model Update Filtering
     ref: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/0005880.pdf
     """
-    comm_interval = 10  # interval of communication
+    history = []
+    batch_cnt = 0
+    start_time = time.time()
 
+    comm_interval = 10  # interval of communication
     beta = 0.5  # momentum coef
     m = 0  # momentum
     t = 0
@@ -240,15 +269,32 @@ def BMUF(ds, ps, workers):
         params = sum(all_params) / len(workers)
         m = beta * m + (1.0 - beta) * params
         m_ = m / (1 - beta ** t)  # bias correction
+
         # update global model
-        ps.apply_update.remote(m_, type_="params", cnt=len(workers) * comm_interval)
+        ps.apply_update.remote(m_, type_="params")
+        batch_cnt += len(workers) * comm_interval
+
+        # evaluation
+        ss.set_params.remote(ps.get_params.remote())
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
+        res = {"t": time.time() - start_time, 
+               "acc": acc["accuracy"],
+               "batch_cnt": batch_cnt}
+        print(res)
+        history.append(res)
+
+    return history
 
 
-def EASGD(ds, ps, workers):
+def EASGD(ss, ds, ps, workers):
     """
     Elastic Average Stochastic Gradient Decent
     ref: https://arxiv.org/abs/1412.6651
     """
+    history = []
+    batch_cnt = 0
+    start_time = time.time()
+
     alpha = 0.05  # elastic coefficient
     beta = 0.5  # momentum coefficient
     m = 0  # momentum
@@ -280,7 +326,19 @@ def EASGD(ds, ps, workers):
         m = beta * m + (1.0 - beta) * params
         m_ = m / (1 - beta ** t)  # bias correction
         # update global model
-        ps.apply_update.remote(m_, type_="params", cnt=len(workers))
+        ps.apply_update.remote(m_, type_="params")
+        batch_cnt += len(workers)
+
+        # evaluation
+        ss.set_params.remote(ps.get_params.remote())
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
+        res = {"t": time.time() - start_time, 
+               "acc": acc["accuracy"],
+               "batch_cnt": batch_cnt}
+        print(res)
+        history.append(res)
+
+    return history
 
 
 def main(args):
@@ -296,6 +354,8 @@ def main(args):
     ray.init()
     # init a network model
     model = get_model(args.lr)
+    # init the statistics server
+    ss = StatsServer.remote(model=copy.deepcopy(model))
     # init the data server
     ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
     # init the parameter server
@@ -314,7 +374,13 @@ def main(args):
         return 
 
     # run synchronous training
-    algo(ds, ps, workers)
+    history = algo(ss, ds, ps, workers)
+    if not os.path.isdir(args.result_dir):
+        os.makedirs(args.result_dir)
+
+    save_path = os.path.join(args.result_dir, args.algo)
+    with open(save_path, "wb") as f:
+        pickle.dump(history, f)
 
 
 if __name__ == "__main__":
@@ -325,9 +391,11 @@ if __name__ == "__main__":
                         help="[*SSGD|MA|BUMF|EASGD]")
     parser.add_argument("--data_dir", type=str,
                         default=os.path.join(curr_dir, "data"))
-    parser.add_argument("--num_workers", type=int, default=4,
+    parser.add_argument("--result_dir", type=str,
+                        default=os.path.join(curr_dir, "result"))
+    parser.add_argument("--num_workers", type=int, default=2,
                         help="Number of workers.")
-    parser.add_argument("--num_ep", default=4, type=int)
+    parser.add_argument("--num_ep", default=1, type=int)
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--seed", default=-1, type=int)
