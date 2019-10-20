@@ -13,8 +13,12 @@
 #### Get started
 
 ```bash
+# git clone
+git clone --recursive https://github.com/borgwang/distributed-ml.git
+
+cd distributed-ml
 pip install -r requirements.txt
 
-# add tinynn to python path
-PYTHONPATH=$PYTHONPATH:$PROJECT_DIR/tinynn python distributed-ml/sync_run.py --algo SSGD
+# run
+PYTHONPATH=$PYTHONPATH:./tinynn python distributed-ml/sync_run.py --algo SSGD
 ```
