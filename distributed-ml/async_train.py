@@ -93,6 +93,10 @@ class Worker(object):
     def __init__(self, model):
         self.model = model
 
+        self.t = 0
+        self.mse = 0
+        self.beta = 0.95
+
     def get_params(self):
         return self.model.net.params
 
@@ -106,6 +110,22 @@ class Worker(object):
 
     def apply_grads(self, grads):
         self.model.apply_grad(grads)
+
+    def compute_dc_grads(self, batch, global_params):
+        self.t += 1
+
+        grads = self.compute_grads(batch)
+
+        # # adaptive lambda
+        # self.mse = self.beta * self.mse + (1 - self.beta) * grads ** 2
+        # mse = self.mse / (1 - self.beta ** self.t)
+        # lambda_ = 2.0 / (mse + 1e-7) ** 0.5
+
+        # constant lambda
+        lambda_ = 0.04
+
+        approx_hessian = lambda_ * grads * grads 
+        return grads + approx_hessian * (self.model.net.params - global_params)
 
 
 @ray.remote
@@ -139,7 +159,10 @@ class DataServer(object):
 
 
 def ASGD(ss, ds, ps, workers):
-    """Asynchronous Stochastic Gradient Descent"""
+    """
+    Asynchronous Stochastic Gradient Descent
+    ref: https://arxiv.org/abs/1104.5525
+    """
     history = []
     start_time = time.time()
 
@@ -159,7 +182,39 @@ def ASGD(ss, ds, ps, workers):
 
         ss.set_params.remote(ps.get_params.remote())
         acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"t": time.time() - start_time, "acc": acc}
+        res = {"iter": i, "t": time.time() - start_time, "acc": acc}
+        print(res)
+        history.append(res)
+    return history
+
+
+def DCASGD(ss, ds, ps, workers):
+    """
+    Asynchronous Stochastic Gradient Descent with Delay Compensation
+    ref: https://arxiv.org/abs/1609.08326
+    """
+    history = []
+    start_time = time.time()
+
+    iterations = ray.get(ds.total_iters.remote())
+    for i in range(iterations):
+        for worker in workers:
+            # fetch global params
+            global_params = ps.get_params.remote()
+            worker.set_params.remote(global_params)
+
+            # update local params
+            batch = ds.next_batch.remote()
+            # compute dc_grads
+            dc_grads = worker.compute_dc_grads.remote(
+                batch, global_params)
+
+            # push dc_grads to the param server
+            ps.apply_update.remote(dc_grads, type_="grads")
+
+        ss.set_params.remote(ps.get_params.remote())
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
+        res = {"iter": i, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
     return history
@@ -190,11 +245,11 @@ def main(args):
         worker = Worker.remote(model=copy.deepcopy(model))
         workers.append(worker)
 
-    algo_dict = {"ASGD": ASGD}
+    algo_dict = {"ASGD": ASGD, "DCASGD": DCASGD}
     algo = algo_dict.get(args.algo, None)
     if algo is None:
         print("Error: Invalid training algorithm. "
-              "Available choices: [ASGD]")
+              "Available choices: [ASGD|DCASGD]")
         return 
 
     # run asynchronous training
@@ -212,7 +267,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--algo", type=str, default="ASGD",
-                        help="[ASGD]")
+                        help="[ASGD|DCASGD]")
     parser.add_argument("--data_dir", type=str,
                         default=os.path.join(curr_dir, "data"))
     parser.add_argument("--result_dir", type=str,
