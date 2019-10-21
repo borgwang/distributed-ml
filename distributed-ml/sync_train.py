@@ -21,10 +21,6 @@ from utils.metric import accuracy
 from utils.seeder import random_seed
 
 
-def get_one_hot(targets, nb_classes):
-    return np.eye(nb_classes)[np.array(targets).reshape(-1)]
-
-
 def get_model(lr):
     net = Net([
         Dense(200),
@@ -84,7 +80,7 @@ class ParamServer(object):
             self.set_params(values)
     
     def apply_grads(self, grads):
-        self.model.apply_grad(grads)
+        self.model.apply_grads(grads)
 
 
 @ray.remote
@@ -105,7 +101,7 @@ class Worker(object):
         return grads
 
     def apply_grads(self, grads):
-        self.model.apply_grad(grads)
+        self.model.apply_grads(grads)
 
     def elastic_update(self, params, alpha=0.5):
         diff = self.model.net.params - params
@@ -116,7 +112,7 @@ class Worker(object):
 class DataServer(object):
 
     def __init__(self, dataset, batch_size, num_ep):
-        self._train_set, self._test_set = dataset
+        self._train_set, _, self._test_set = dataset
 
         self.iterator = BatchIterator(batch_size)
         self.batch_gen = None
@@ -343,10 +339,7 @@ def main(args):
         random_seed(args.seed)
 
     # dataset preparation
-    train_set, _, test_set = mnist(args.data_dir)
-    train_set = (train_set[0], get_one_hot(train_set[1], 10))
-    test_set = (test_set[0], get_one_hot(test_set[1], 10))
-    dataset = (train_set, test_set)
+    dataset = mnist(args.data_dir, one_hot=True)
 
     ray.init()
     # init a network model
