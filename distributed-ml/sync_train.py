@@ -16,7 +16,7 @@ from core.model import Model
 from core.net import Net
 from core.optimizer import Adam
 from utils.data_iterator import BatchIterator
-from utils.dataset import mnist
+from utils.dataset import cifar10
 from utils.metric import accuracy
 from utils.seeder import random_seed
 
@@ -35,7 +35,7 @@ def get_model(lr):
     model = Model(net=net, loss=SoftmaxCrossEntropy(),
                   optimizer=Adam(lr=lr))
     # init parameters manually
-    model.net.init_params(input_shape=(784,))
+    model.net.init_params(input_shape=(3072,))
     return model
 
 
@@ -112,7 +112,7 @@ class Worker(object):
 class DataServer(object):
 
     def __init__(self, dataset, batch_size, num_ep):
-        self._train_set, _, self._test_set = dataset
+        self._train_set, self._test_set = dataset
 
         self.iterator = BatchIterator(batch_size)
         self.batch_gen = None
@@ -339,7 +339,7 @@ def main(args):
         random_seed(args.seed)
 
     # dataset preparation
-    dataset = mnist(args.data_dir, one_hot=True)
+    dataset = cifar10(args.data_dir, one_hot=True)
 
     ray.init()
     # init a network model
@@ -359,9 +359,8 @@ def main(args):
     algo_dict = {"SSGD": SSGD, "MA": MA, "BMUF": BMUF, "EASGD": EASGD}
     algo = algo_dict.get(args.algo, None)
     if algo is None:
-        print("Error: Invalid training algorithm. "
-              "Available choices: [SSGD|MA|BUMF|EASGD]")
-        return 
+        raise ValueError("Error: Invalid training algorithm. "
+                         "Available choices: [SSGD|MA|BUMF|EASGD]")
 
     # run synchronous training
     history = algo(ss, ds, ps, workers)
