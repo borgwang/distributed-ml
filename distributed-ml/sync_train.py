@@ -111,20 +111,23 @@ class Worker(object):
 @ray.remote
 class DataServer(object):
 
-    def __init__(self, dataset, batch_size, num_ep):
+    def __init__(self, dataset, batch_size, num_ep, num_workers):
         self._train_set, self._test_set = dataset
 
         self.iterator = BatchIterator(batch_size)
         self.batch_gen = None
 
-        iter_each_epoch = len(self._train_set[0]) // batch_size + 1
-        self._total_iters = num_ep * iter_each_epoch
+        self._iter_each_epoch = len(self._train_set[0]) // batch_size + 1
+        self._total_iters = num_workers * num_ep * self._iter_each_epoch
 
     def test_set(self):
         return self._test_set
 
     def total_iters(self):
         return self._total_iters
+
+    def iter_each_epoch(self):
+        return self._iter_each_epoch
 
     def next_batch(self):
         if self.batch_gen is None:
@@ -145,8 +148,8 @@ def SSGD(ss, ds, ps, workers):
     """
     history = []
     start_time = time.time()
-    batch_cnt = 0
 
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations):
@@ -166,14 +169,12 @@ def SSGD(ss, ds, ps, workers):
         grads = sum(all_grads) / len(workers)
         # update global model
         ps.apply_update.remote(grads, type_="grads")
-        batch_cnt += len(workers)
 
         # evaluation
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"t": time.time() - start_time, 
-               "acc": acc["accuracy"],
-               "batch_cnt": batch_cnt}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        epoch = (1.0 * i * len(workers)) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
     return history
@@ -185,11 +186,11 @@ def MA(ss, ds, ps, workers):
     ref: https://www.aclweb.org/anthology/N10-1069.pdf
     """
     history = []
-    batch_cnt = 0
     start_time = time.time()
 
     comm_interval = 10  # interval of communication
     
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations // comm_interval):
@@ -211,14 +212,12 @@ def MA(ss, ds, ps, workers):
         params = sum(all_params) / len(workers)
         # update global model
         ps.apply_update.remote(params, type_="params")
-        batch_cnt += len(workers) * comm_interval
 
         # evaluation
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"t": time.time() - start_time, 
-               "acc": acc["accuracy"],
-               "batch_cnt": batch_cnt}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        epoch = (1.0 * i * len(workers) * comm_interval) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
 
@@ -231,7 +230,6 @@ def BMUF(ss, ds, ps, workers):
     ref: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/0005880.pdf
     """
     history = []
-    batch_cnt = 0
     start_time = time.time()
 
     comm_interval = 10  # interval of communication
@@ -239,6 +237,7 @@ def BMUF(ss, ds, ps, workers):
     m = 0  # momentum
     t = 0
 
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations // comm_interval):
@@ -265,14 +264,12 @@ def BMUF(ss, ds, ps, workers):
 
         # update global model
         ps.apply_update.remote(m_, type_="params")
-        batch_cnt += len(workers) * comm_interval
 
         # evaluation
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"t": time.time() - start_time, 
-               "acc": acc["accuracy"],
-               "batch_cnt": batch_cnt}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        epoch = (1.0 * i * len(workers) * comm_interval) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
 
@@ -285,7 +282,6 @@ def EASGD(ss, ds, ps, workers):
     ref: https://arxiv.org/abs/1412.6651
     """
     history = []
-    batch_cnt = 0
     start_time = time.time()
 
     alpha = 0.05  # elastic coefficient
@@ -293,6 +289,7 @@ def EASGD(ss, ds, ps, workers):
     m = 0  # momentum
     t = 0
 
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     # iterations for each worker
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations):
@@ -320,14 +317,13 @@ def EASGD(ss, ds, ps, workers):
         m_ = m / (1 - beta ** t)  # bias correction
         # update global model
         ps.apply_update.remote(m_, type_="params")
-        batch_cnt += len(workers)
 
         # evaluation
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"t": time.time() - start_time, 
-               "acc": acc["accuracy"],
-               "batch_cnt": batch_cnt}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        t = time.time() - start_time
+        epoch = (1.0 * i * len(workers)) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
 
@@ -347,7 +343,8 @@ def main(args):
     # init the statistics server
     ss = StatsServer.remote(model=copy.deepcopy(model))
     # init the data server
-    ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
+    ds = DataServer.remote(dataset, args.batch_size, 
+                           args.num_ep, args.num_workers)
     # init the parameter server
     ps = ParamServer.remote(model=copy.deepcopy(model))
     # init workers

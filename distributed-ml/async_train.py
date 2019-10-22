@@ -127,20 +127,23 @@ class Worker(object):
 @ray.remote
 class DataServer(object):
 
-    def __init__(self, dataset, batch_size, num_ep):
+    def __init__(self, dataset, batch_size, num_ep, num_workers):
         self._train_set, self._test_set = dataset
 
         self.iterator = BatchIterator(batch_size)
         self.batch_gen = None
 
-        iter_each_epoch = len(self._train_set[0]) // batch_size + 1
-        self._total_iters = num_ep * iter_each_epoch
+        self._iter_each_epoch = len(self._train_set[0]) // batch_size + 1
+        self._total_iters = num_workers * num_ep * self._iter_each_epoch
 
     def test_set(self):
         return self._test_set
 
     def total_iters(self):
         return self._total_iters
+
+    def iter_each_epoch(self):
+        return self._iter_each_epoch
 
     def next_batch(self):
         if self.batch_gen is None:
@@ -162,6 +165,7 @@ def ASGD(ss, ds, ps, workers):
     history = []
     start_time = time.time()
 
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations):
         for worker in workers:
@@ -176,9 +180,11 @@ def ASGD(ss, ds, ps, workers):
             # push grads to the param server
             ps.apply_update.remote(grads, type_="grads")
 
+        # evaluate
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"iter": i, "t": time.time() - start_time, "acc": acc}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        epoch = 1.0 * i * len(workers) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
     return history
@@ -192,6 +198,7 @@ def DCASGD(ss, ds, ps, workers):
     history = []
     start_time = time.time()
 
+    iter_each_epoch = ray.get(ds.iter_each_epoch.remote())
     iterations = ray.get(ds.total_iters.remote())
     for i in range(iterations):
         for worker in workers:
@@ -208,9 +215,11 @@ def DCASGD(ss, ds, ps, workers):
             # push dc_grads to the param server
             ps.apply_update.remote(dc_grads, type_="grads")
 
+        # evaluate
         ss.set_params.remote(ps.get_params.remote())
-        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))
-        res = {"iter": i, "t": time.time() - start_time, "acc": acc}
+        acc = ray.get(ss.evaluate.remote(ds.test_set.remote()))["accuracy"]
+        epoch = (1.0 * i * len(workers)) / iter_each_epoch
+        res = {"epoch": epoch, "t": time.time() - start_time, "acc": acc}
         print(res)
         history.append(res)
     return history
@@ -227,15 +236,16 @@ def main(args):
     # init a network model
     model = get_model(args.lr)
     # init the statistics server
-    ss = StatsServer.remote(model=copy.deepcopy(model))
+    ss = StatsServer.remote(copy.deepcopy(model))
     # init the data server
-    ds = DataServer.remote(dataset, args.batch_size, args.num_ep)
+    ds = DataServer.remote(dataset, args.batch_size, 
+                           args.num_ep, args.num_workers)
     # init the parameter server
-    ps = ParamServer.remote(model=copy.deepcopy(model))
+    ps = ParamServer.remote(copy.deepcopy(model))
     # init workers
     workers = []
     for rank in range(1, args.num_workers + 1):
-        worker = Worker.remote(model=copy.deepcopy(model))
+        worker = Worker.remote(copy.deepcopy(model))
         workers.append(worker)
 
     algo_dict = {"ASGD": ASGD, "DCASGD": DCASGD}
@@ -267,6 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of workers.")
     parser.add_argument("--num_ep", default=4, type=int)
+    parser.add_argument("--num_ep", default=2, type=int)
     parser.add_argument("--lr", default=5e-4, type=float)
     parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--seed", default=-1, type=int)
