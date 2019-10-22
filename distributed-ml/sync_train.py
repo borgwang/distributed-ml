@@ -118,7 +118,7 @@ class DataServer(object):
         self.batch_gen = None
 
         self._iter_each_epoch = len(self._train_set[0]) // batch_size + 1
-        self._total_iters = num_workers * num_ep * self._iter_each_epoch
+        self._total_iters = num_ep * self._iter_each_epoch // num_workers + 1
 
     def test_set(self):
         return self._test_set
@@ -165,8 +165,8 @@ def SSGD(ss, ds, ps, workers):
             all_grads.append(local_grads)
         all_grads = ray.get(all_grads)
 
-        # average local gradients
-        grads = sum(all_grads) / len(workers)
+        # sum of all local gradients
+        grads = sum(all_grads)
         # update global model
         ps.apply_update.remote(grads, type_="grads")
 
@@ -364,7 +364,8 @@ def main(args):
     if not os.path.isdir(args.result_dir):
         os.makedirs(args.result_dir)
 
-    save_path = os.path.join(args.result_dir, args.algo)
+    file_name = "%s-%s-%s.log" % (args.algo, args.num_workers, args.num_ep)
+    save_path = os.path.join(args.result_dir, file_name)
     with open(save_path, "wb") as f:
         pickle.dump(history, f)
 

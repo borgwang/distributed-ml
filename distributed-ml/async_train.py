@@ -134,7 +134,7 @@ class DataServer(object):
         self.batch_gen = None
 
         self._iter_each_epoch = len(self._train_set[0]) // batch_size + 1
-        self._total_iters = num_workers * num_ep * self._iter_each_epoch
+        self._total_iters = num_ep * self._iter_each_epoch // num_workers + 1
 
     def test_set(self):
         return self._test_set
@@ -259,7 +259,8 @@ def main(args):
     if not os.path.isdir(args.result_dir):
         os.makedirs(args.result_dir)
 
-    save_path = os.path.join(args.result_dir, args.algo)
+    file_name = "%s-%s-%s.log" % (args.algo, args.num_workers, args.num_ep)
+    save_path = os.path.join(args.result_dir, file_name)
     with open(save_path, "wb") as f:
         pickle.dump(history, f)
 
@@ -277,7 +278,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of workers.")
     parser.add_argument("--num_ep", default=4, type=int)
-    parser.add_argument("--num_ep", default=2, type=int)
     parser.add_argument("--lr", default=5e-4, type=float)
     parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--seed", default=-1, type=int)
