@@ -9,136 +9,23 @@ import time
 import numpy as np
 import ray
 
-from core.layer import Dense
-from core.layer import ReLU
-from core.loss import SoftmaxCrossEntropy
-from core.model import Model
-from core.net import Net
-from core.optimizer import Adam
-from utils.data_iterator import BatchIterator
+from components.data_server import DataServer
+from components.param_server import ParamServer
+from components.stats_server import StatsServer
+from components.worker import Worker
+from models import get_mlp
+
+# tinynn packages
 from utils.dataset import cifar10
-from utils.metric import accuracy
 from utils.seeder import random_seed
 
 
-def get_model(lr):
-    net = Net([
-        Dense(200),
-        ReLU(),
-        Dense(100),
-        ReLU(),
-        Dense(70),
-        ReLU(),
-        Dense(30),
-        ReLU(),
-        Dense(10)])
-    model = Model(net=net, loss=SoftmaxCrossEntropy(),
-                  optimizer=Adam(lr=lr))
-    # init parameters manually
-    model.net.init_params(input_shape=(3072,))
-    return model
-
-
 @ray.remote
-class StatsServer(object):
-
-    def __init__(self, model):
-        self.model = model
-        self.model.set_phase("TEST")
-
-    def set_params(self, params):
-        self.model.net.params = params
-
-    def evaluate(self, test_set):
-        test_x, test_y = test_set
-        test_pred = self.model.forward(test_x)
-
-        test_pred_idx = np.argmax(test_pred, axis=1)
-        test_y_idx = np.argmax(test_y, axis=1)
-        return accuracy(test_pred_idx, test_y_idx)
-        
-
-@ray.remote
-class ParamServer(object):
-
-    def __init__(self, model):
-        self.model = model
-
-        self.start_time = time.time()
-
-    def get_params(self):
-        return self.model.net.params
-
-    def set_params(self, params):
-        self.model.net.params = params
-
-    def apply_update(self, values, type_):
-        assert type_ in ("grads", "params")
-        if type_ == "grads":
-            self.apply_grads(values)
-        else:
-            self.set_params(values)
-    
-    def apply_grads(self, grads):
-        self.model.apply_grads(grads)
-
-
-@ray.remote
-class Worker(object):
-
-    def __init__(self, model):
-        self.model = model
-
-    def get_params(self):
-        return self.model.net.params
-
-    def set_params(self, params):
-        self.model.net.params = params
-
-    def compute_grads(self, batch):
-        preds = self.model.forward(batch.inputs)
-        _, grads = self.model.backward(preds, batch.targets)
-        return grads
-
-    def apply_grads(self, grads):
-        self.model.apply_grads(grads)
+class SyncWorker(Worker):
 
     def elastic_update(self, params, alpha=0.5):
         diff = self.model.net.params - params
         self.model.net.params -= alpha * diff
-
-
-@ray.remote
-class DataServer(object):
-
-    def __init__(self, dataset, batch_size, num_ep, num_workers):
-        self._train_set, self._test_set = dataset
-
-        self.iterator = BatchIterator(batch_size)
-        self.batch_gen = None
-
-        self._iter_each_epoch = len(self._train_set[0]) // batch_size + 1
-        self._total_iters = num_ep * self._iter_each_epoch // num_workers + 1
-
-    def test_set(self):
-        return self._test_set
-
-    def total_iters(self):
-        return self._total_iters
-
-    def iter_each_epoch(self):
-        return self._iter_each_epoch
-
-    def next_batch(self):
-        if self.batch_gen is None:
-            self.batch_gen = self.iterator(*self._train_set)
-
-        try:
-            batch = next(self.batch_gen)
-        except StopIteration:
-            self.batch_gen = None
-            batch = self.next_batch()
-        return batch
 
 
 def SSGD(ss, ds, ps, workers):
@@ -339,7 +226,9 @@ def main(args):
 
     ray.init()
     # init a network model
-    model = get_model(args.lr)
+    model = get_mlp(args.lr)
+    input_dim = np.prod(dataset[0][0].shape[1:])
+    model.net.init_params(input_shape=(input_dim,))
     # init the statistics server
     ss = StatsServer.remote(model=copy.deepcopy(model))
     # init the data server
@@ -350,7 +239,7 @@ def main(args):
     # init workers
     workers = []
     for rank in range(1, args.num_workers + 1):
-        worker = Worker.remote(model=copy.deepcopy(model))
+        worker = SyncWorker.remote(model=copy.deepcopy(model))
         workers.append(worker)
 
     algo_dict = {"SSGD": SSGD, "MA": MA, "BMUF": BMUF, "EASGD": EASGD}
