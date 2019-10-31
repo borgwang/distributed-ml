@@ -8,7 +8,7 @@
 
 - Asynchronous
     - ASGD [Distributed Delayed Stochastic Optimization](https://arxiv.org/abs/1104.5525)
-    - DC-ASGD [Asynchronous Stochastic Gradient Descent with Delay Compensation](https://arxiv.org/abs/1609.08326)
+    - DCASGD [Asynchronous Stochastic Gradient Descent with Delay Compensation](https://arxiv.org/abs/1609.08326)
 
 #### Get started
 
@@ -20,5 +20,5 @@ cd distributed-ml
 pip install -r requirements.txt
 
 # run
-PYTHONPATH=$PYTHONPATH:./tinynn python distributed-ml/sync_run.py --algo SSGD
+PYTHONPATH=$PYTHONPATH:./tinynn python distributed-ml/sync_train.py --algo SSGD
 ```
