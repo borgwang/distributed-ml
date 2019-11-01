@@ -8,16 +8,14 @@ import time
 
 import numpy as np
 import ray
+from tinynn.utils.dataset import cifar10
+from tinynn.utils.seeder import random_seed
 
 from components.data_server import DataServer
 from components.param_server import ParamServer
 from components.stats_server import StatsServer
 from components.worker import Worker
 from models import get_mlp
-
-# tinynn packages
-from utils.dataset import cifar10
-from utils.seeder import random_seed
 
 
 @ray.remote

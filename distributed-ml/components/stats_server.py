@@ -1,7 +1,6 @@
 import numpy as np
 import ray
-
-from utils.metric import accuracy
+from tinynn.utils.metric import accuracy
 
 
 @ray.remote

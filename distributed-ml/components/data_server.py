@@ -1,6 +1,5 @@
 import ray
-
-from utils.data_iterator import BatchIterator
+from tinynn.utils.data_iterator import BatchIterator
 
 
 @ray.remote

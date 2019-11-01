@@ -1,10 +1,9 @@
-# tinynn packages
-from core.layer import Dense
-from core.layer import ReLU
-from core.loss import SoftmaxCrossEntropy
-from core.model import Model
-from core.net import Net
-from core.optimizer import Adam
+from tinynn.core.layer import Dense
+from tinynn.core.layer import ReLU
+from tinynn.core.loss import SoftmaxCrossEntropy
+from tinynn.core.model import Model
+from tinynn.core.net import Net
+from tinynn.core.optimizer import Adam
 
 
 def get_mlp(lr):

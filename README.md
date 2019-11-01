@@ -14,11 +14,13 @@
 
 ```bash
 # git clone
-git clone --recursive https://github.com/borgwang/distributed-ml.git
+git clone https://github.com/borgwang/distributed-ml.git
 
 cd distributed-ml
 pip install -r requirements.txt
 
-# run
-PYTHONPATH=$PYTHONPATH:./tinynn python distributed-ml/sync_train.py --algo SSGD
+# sysc training
+python distributed-ml/sync_train.py --algo SSGD
+# asysc training
+python distributed-ml/async_train.py --algo ASGD
 ```

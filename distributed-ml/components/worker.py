@@ -1,7 +1,3 @@
-import ray
-
-
-@ray.remote
 class Worker(object):
 
     def __init__(self, model):
