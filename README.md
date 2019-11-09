@@ -1,4 +1,6 @@
-### Distributed Training of Machine Learning Models
+### Distributed Training of Neural Networks
+
+Implement popular distributed training algorithms for neural networks.
 
 - Synchronous
     - SSGD [Parallelized Stochastic Gradient Descent](https://papers.nips.cc/paper/4006-parallelized-stochastic-gradient-descent.pdf)
@@ -9,6 +11,12 @@
 - Asynchronous
     - ASGD [Distributed Delayed Stochastic Optimization](https://arxiv.org/abs/1104.5525)
     - DCASGD [Asynchronous Stochastic Gradient Descent with Delay Compensation](https://arxiv.org/abs/1609.08326)
+
+
+#### Requirements
+- Deep learning library [tinynn](https://github.com/borgwang/tinynn)
+- Distributed training framework [Ray](https://github.com/ray-project/ray)
+
 
 #### Get started
 
